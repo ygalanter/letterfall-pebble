@@ -36,7 +36,7 @@
 #define PERSIST_KEY_SHAKE 6
 #define PERSIST_KEY_SOUND_VOLUME 7
 
-#define DEFAULT_SOUND_VOLUME 100
+#define DEFAULT_SOUND_VOLUME 20  // matches Clay slider default in src/pkjs/config.json
 
 #define COLOR_MAIN_BACKGROUND GColorBulgarianRose
 #define COLOR_MODAL_BACKGROUND GColorWindsorTan
@@ -113,6 +113,15 @@ static const SpeakerNote BAD_WORD_NOTES[] = {
   { .midi_note = 48, .waveform = SpeakerWaveformSquare, .duration_ms = 130 },
 };
 
+// Longer, slower descending lament so game over reads as more weighty
+// than just submitting an invalid word.
+static const SpeakerNote GAME_OVER_NOTES[] = {
+  { .midi_note = 60, .waveform = SpeakerWaveformSquare, .duration_ms = 150 },
+  { .midi_note = 55, .waveform = SpeakerWaveformSquare, .duration_ms = 150 },
+  { .midi_note = 50, .waveform = SpeakerWaveformSquare, .duration_ms = 150 },
+  { .midi_note = 43, .waveform = SpeakerWaveformSquare, .duration_ms = 350 },
+};
+
 static int clamp_sound_volume(int value) {
   if (value < 0) return 0;
   if (value > 100) return 100;
@@ -125,41 +134,61 @@ static uint8_t sound_velocity(void) {
   return (uint8_t)((volume * 127 + 50) / 100);
 }
 
-static void play_tap_tone(void) {
+static void play_single_tone(uint8_t midi_note, uint16_t duration_ms,
+                             SpeakerWaveform waveform) {
   uint8_t velocity = sound_velocity();
   if (velocity == 0) return;
   SpeakerNote note = {
-    .midi_note = 88,
-    .waveform = SpeakerWaveformSquare,
-    .duration_ms = 45,
+    .midi_note = midi_note,
+    .waveform = waveform,
+    .duration_ms = duration_ms,
     .velocity = velocity,
   };
   speaker_stop();
   speaker_play_notes(&note, 1, 100);
 }
 
-static void play_good_tone(void) {
+static void play_note_sequence(const SpeakerNote *src, size_t count) {
   uint8_t velocity = sound_velocity();
-  if (velocity == 0) return;
-  SpeakerNote notes[sizeof(GOOD_WORD_NOTES) / sizeof(GOOD_WORD_NOTES[0])];
-  memcpy(notes, GOOD_WORD_NOTES, sizeof(notes));
-  for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
+  if (velocity == 0 || count == 0) return;
+  // Stack-copy so we can stamp the per-note velocity without mutating the
+  // const template.
+  SpeakerNote notes[8];
+  if (count > sizeof(notes) / sizeof(notes[0])) {
+    count = sizeof(notes) / sizeof(notes[0]);
+  }
+  memcpy(notes, src, count * sizeof(SpeakerNote));
+  for (size_t i = 0; i < count; i++) {
     notes[i].velocity = velocity;
   }
   speaker_stop();
-  speaker_play_notes(notes, sizeof(notes) / sizeof(notes[0]), 100);
+  speaker_play_notes(notes, count, 100);
+}
+
+// Tile-press feedback: short, bright square click.
+static void play_press_tone(void) {
+  play_single_tone(88, 45, SpeakerWaveformSquare);
+}
+
+// Tile-unpress: a perfect fourth below the press tone, so retracting a
+// selection sounds audibly distinct from extending it.
+static void play_unpress_tone(void) {
+  play_single_tone(83, 45, SpeakerWaveformSquare);
+}
+
+static void play_good_tone(void) {
+  play_note_sequence(GOOD_WORD_NOTES,
+                     sizeof(GOOD_WORD_NOTES) / sizeof(GOOD_WORD_NOTES[0]));
 }
 
 static void play_bad_tone(void) {
-  uint8_t velocity = sound_velocity();
-  if (velocity == 0) return;
-  SpeakerNote notes[sizeof(BAD_WORD_NOTES) / sizeof(BAD_WORD_NOTES[0])];
-  memcpy(notes, BAD_WORD_NOTES, sizeof(notes));
-  for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
-    notes[i].velocity = velocity;
-  }
-  speaker_stop();
-  speaker_play_notes(notes, sizeof(notes) / sizeof(notes[0]), 100);
+  play_note_sequence(BAD_WORD_NOTES,
+                     sizeof(BAD_WORD_NOTES) / sizeof(BAD_WORD_NOTES[0]));
+}
+
+static void play_game_over_tone(void) {
+  play_note_sequence(GAME_OVER_NOTES,
+                     sizeof(GAME_OVER_NOTES) / sizeof(GAME_OVER_NOTES[0]));
 }
 
 // Letter frequency thresholds match the original Fitbit implementation.
@@ -439,6 +468,9 @@ static void force_all_alpha_full(void) {
   }
 }
 
+// Mark the user's selected tiles as DELETED but keep the s_selected list intact:
+// the renderer relies on selection_contains() to draw them in the pressed color
+// during fade-out. Selection is cleared just before compact_columns().
 static void mark_pressed_deleted(void) {
   for (int i = 0; i < s_selected_count; i++) {
     int row = s_selected[i][0];
@@ -447,7 +479,6 @@ static void mark_pressed_deleted(void) {
       s_board[row][col].status = STATUS_DELETED;
     }
   }
-  clear_selection();
 }
 
 // Mark tiles below burning ones as DELETED so the burning tiles drop down.
@@ -535,7 +566,7 @@ static void enter_game_over(void) {
   s_drop_processing_word = false;
   force_all_alpha_full();
   s_screen = SCREEN_GAME_OVER;
-  play_bad_tone();
+  play_game_over_tone();
   mark_dirty();
 }
 
@@ -612,6 +643,9 @@ static void anim_tick(void *ctx) {
 
   // Phase complete: transition.
   if (s_anim_phase == ANIM_FADE_OUT) {
+    // Clear selection before compact reshuffles tile positions, so the now-stale
+    // (row, col) entries in s_selected don't accidentally light up new letters.
+    clear_selection();
     compact_columns();
     start_fade_in();
     return;
@@ -765,7 +799,7 @@ static void tap_letter(int row, int col) {
     // Only allow unpressing the most-recent tile.
     if (idx == s_selected_count - 1) {
       s_selected_count--;
-      play_tap_tone();
+      play_unpress_tone();
       mark_dirty();
     }
     return;
@@ -777,7 +811,7 @@ static void tap_letter(int row, int col) {
   s_selected[s_selected_count][0] = row;
   s_selected[s_selected_count][1] = col;
   s_selected_count++;
-  play_tap_tone();
+  play_press_tone();
   mark_dirty();
 }
 
@@ -977,11 +1011,14 @@ static void draw_title_modal(GContext *ctx) {
                      GRect(modal.origin.x, modal.origin.y + 56, modal.size.w, 28),
                      GColorPastelYellow);
 
-  char rank_buf[40];
-  snprintf(rank_buf, sizeof(rank_buf), "RANK: %s", rank_title_for(s_rank));
-  draw_text_centered(ctx, rank_buf, info_font,
+  draw_text_centered(ctx, "RANK:", info_font,
                      GRect(modal.origin.x + 6, modal.origin.y + 90,
-                           modal.size.w - 12, 22),
+                           modal.size.w - 12, 20),
+                     GColorPastelYellow);
+
+  draw_text_centered(ctx, rank_title_for(s_rank), info_font,
+                     GRect(modal.origin.x + 6, modal.origin.y + 112,
+                           modal.size.w - 12, 24),
                      GColorPastelYellow);
 
   draw_text_centered(ctx, prompt, prompt_font,
@@ -1159,24 +1196,43 @@ static void click_config_provider(void *context) {
 // Settings
 // ---------------------------------------------------------------------------
 
-static int parse_int_tuple(Tuple *t, int fallback) {
+// Read a Tuple as a signed integer regardless of its underlying width. Clay can
+// send 1/2/4-byte ints depending on the value, and reading the wrong union
+// member returns garbage past the actual data.
+static int32_t parse_int_tuple(Tuple *t, int32_t fallback) {
   if (!t) return fallback;
-  if (t->type == TUPLE_CSTRING) {
-    return atoi(t->value->cstring);
+  switch (t->type) {
+    case TUPLE_INT:
+      switch (t->length) {
+        case 1: return t->value->int8;
+        case 2: return t->value->int16;
+        case 4: return t->value->int32;
+      }
+      return fallback;
+    case TUPLE_UINT:
+      switch (t->length) {
+        case 1: return t->value->uint8;
+        case 2: return t->value->uint16;
+        case 4: return (int32_t)t->value->uint32;
+      }
+      return fallback;
+    case TUPLE_CSTRING:
+      return t->length > 0 ? atoi(t->value->cstring) : fallback;
+    default:
+      return fallback;
   }
-  return (int)t->value->int32;
 }
 
 static bool parse_bool_tuple(Tuple *t, bool fallback) {
   if (!t) return fallback;
   if (t->type == TUPLE_CSTRING) {
+    if (t->length == 0) return fallback;
     const char *v = t->value->cstring;
-    if (!v) return fallback;
     if (strcmp(v, "true") == 0 || strcmp(v, "TRUE") == 0) return true;
     if (strcmp(v, "false") == 0 || strcmp(v, "FALSE") == 0) return false;
     return atoi(v) != 0;
   }
-  return t->value->uint8 != 0;
+  return parse_int_tuple(t, fallback ? 1 : 0) != 0;
 }
 
 static void inbox_received(DictionaryIterator *iter, void *ctx) {
@@ -1225,7 +1281,7 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (now - s_last_shake < (SHAKE_DEBOUNCE_MS / 1000) + 1) return;
   s_last_shake = now;
 
-  play_tap_tone();
+  play_press_tone();
   shuffle_non_burning();
 
   // Mark below burning so the burnings drop, then run a drop animation.
