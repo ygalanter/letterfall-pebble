@@ -459,6 +459,8 @@ static void enter_game_over(void) {
   cancel_anim_timer();
   s_input_locked = false;
   s_anim_phase = ANIM_NONE;
+  s_drop_processing_word = false;
+  force_all_alpha_full();
   s_screen = SCREEN_GAME_OVER;
   vibes_double_pulse();
   mark_dirty();
@@ -484,6 +486,13 @@ static void start_drop_animation(int word_len) {
   s_input_locked = true;
   s_drop_word_len = word_len;
   s_drop_processing_word = true;
+  start_fade_out();
+}
+
+static void start_fire_drop_animation(void) {
+  s_input_locked = true;
+  s_drop_word_len = 0;
+  s_drop_processing_word = false;
   start_fade_out();
 }
 
@@ -558,6 +567,39 @@ static void anim_tick(void *ctx) {
   mark_dirty();
 }
 
+static bool complete_drop_immediately(bool process_word, int word_len) {
+  if (any_deleted_tile()) {
+    compact_columns();
+  }
+  force_all_alpha_full();
+
+  if (process_word) {
+    if (!mark_below_burning()) {
+      return false;
+    }
+    create_burning_letters(word_len);
+    create_gold_letters(word_len);
+    if (any_deleted_tile()) {
+      compact_columns();
+      force_all_alpha_full();
+    }
+  }
+
+  s_anim_phase = ANIM_NONE;
+  s_drop_processing_word = false;
+  s_input_locked = false;
+  save_field();
+  mark_dirty();
+  return true;
+}
+
+static bool finish_active_drop_immediately(void) {
+  bool process_word = s_drop_processing_word;
+  int word_len = s_drop_word_len;
+  cancel_anim_timer();
+  return complete_drop_immediately(process_word, word_len);
+}
+
 // ---------------------------------------------------------------------------
 // Scoring + popup
 // ---------------------------------------------------------------------------
@@ -582,7 +624,7 @@ static void popup_dismiss(void *ctx) {
   s_popup_timer = NULL;
   s_screen = SCREEN_PLAYING;
   mark_pressed_deleted();
-  schedule_drop(true, (int)strlen(s_popup_word));
+  start_drop_animation((int)strlen(s_popup_word));
 }
 
 static void on_word_validated(bool valid, const char *word, int word_len, int cost_total) {
@@ -700,11 +742,11 @@ static void draw_letter(GContext *ctx, GRect rect, char letter, GColor color) {
                      GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 }
 
-static void draw_cost_badge(GContext *ctx, GRect rect, uint8_t cost) {
+static void draw_cost_badge(GContext *ctx, GRect rect, uint8_t cost, GColor color) {
   if (cost <= 1) return;
   char buf[4];
   snprintf(buf, sizeof(buf), "%u", cost);
-  graphics_context_set_text_color(ctx, GColorOxfordBlue);
+  graphics_context_set_text_color(ctx, color);
   GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
   GRect badge = GRect(rect.origin.x + rect.size.w - 12,
                       rect.origin.y - 2,
@@ -728,23 +770,43 @@ static void draw_submit_button(GContext *ctx, GRect rect, bool enabled) {
   graphics_context_set_stroke_width(ctx, 1);
 }
 
+static uint8_t blend_component(uint8_t base, uint8_t tint, uint8_t weight, uint8_t total);
+
+static GColor fade_to_board_color(GColor color, uint8_t alpha) {
+  if (alpha >= 255) return color;
+  if (alpha == 0) return GColorBlack;
+  GColor black = GColorBlack;
+  GColor blended;
+  blended.a = 3;
+  blended.r = blend_component(black.r, color.r, alpha, 255);
+  blended.g = blend_component(black.g, color.g, alpha, 255);
+  blended.b = blend_component(black.b, color.b, alpha, 255);
+  return blended;
+}
+
 static void draw_tile(GContext *ctx, int row, int col) {
   GRect rect = tile_rect(row, col);
   if (is_submit_tile(row, col)) {
     draw_submit_button(ctx, rect, s_selected_count >= MIN_WORD_LEN);
     return;
   }
+  uint8_t alpha = s_board[row][col].alpha;
+  if (alpha == 0) return;
+
   GColor fill = tile_fill_color(row, col);
   bool selected = selection_contains(row, col, NULL);
   if (selected) fill = GColorOrange;
+  fill = fade_to_board_color(fill, alpha);
 
   graphics_context_set_fill_color(ctx, fill);
   graphics_fill_rect(ctx, rect, TILE_RADIUS, GCornersAll);
 
   GColor text = selected ? GColorBlack : tile_text_color(row, col);
+  text = fade_to_board_color(text, alpha);
   draw_letter(ctx, rect, (char)s_board[row][col].letter, text);
   if (!selected) {
-    draw_cost_badge(ctx, rect, s_board[row][col].cost);
+    draw_cost_badge(ctx, rect, s_board[row][col].cost,
+                    fade_to_board_color(GColorOxfordBlue, alpha));
   }
 }
 
@@ -891,7 +953,10 @@ static void scene_update_proc(Layer *layer, GContext *ctx) {
 // ---------------------------------------------------------------------------
 
 static void enter_title(TitleVariant variant) {
-  cancel_drop_timer();
+  cancel_anim_timer();
+  s_anim_phase = ANIM_NONE;
+  s_drop_processing_word = false;
+  force_all_alpha_full();
   if (s_popup_timer) {
     app_timer_cancel(s_popup_timer);
     s_popup_timer = NULL;
@@ -992,17 +1057,19 @@ static void back_click_handler(ClickRecognizerRef recognizer, void *context) {
   if (s_popup_timer) {
     app_timer_cancel(s_popup_timer);
     s_popup_timer = NULL;
-    // If we interrupt the popup, complete the drop now so state is consistent.
+    // If the score popup is interrupted, commit the validated word before saving.
     mark_pressed_deleted();
-    s_drop_phase = DROP_PHASE_NONE;
-    compact_columns();
-    if (!mark_below_burning()) {
+    if (!complete_drop_immediately(true, (int)strlen(s_popup_word))) {
       enter_game_over();
       return;
     }
-    compact_columns();
+  } else if (s_anim_phase != ANIM_NONE) {
+    if (!finish_active_drop_immediately()) {
+      enter_game_over();
+      return;
+    }
   }
-  cancel_drop_timer();
+  cancel_anim_timer();
   clear_selection();
   save_field();
   enter_title(TITLE_CONTINUED);
@@ -1042,18 +1109,20 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   vibes_short_pulse();
   shuffle_non_burning();
 
-  // Mark below burning so the burnings drop, then run a drop.
+  // Mark below burning so the burnings drop, then run a drop animation.
   s_input_locked = true;
-  s_drop_phase = DROP_PHASE_FROM_FIRE;
   if (!mark_below_burning()) {
     enter_game_over();
     return;
   }
   // Force at least one new burning tile next iteration.
   s_small_count = s_small_limit;
-  cancel_drop_timer();
-  s_drop_timer = app_timer_register(DROP_STEP_MS, drop_step, NULL);
-  mark_dirty();
+  if (any_deleted_tile()) {
+    start_fire_drop_animation();
+  } else {
+    s_input_locked = false;
+    mark_dirty();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,7 +1142,7 @@ static void window_load(Window *window) {
 
 static void window_unload(Window *window) {
   (void)window;
-  cancel_drop_timer();
+  cancel_anim_timer();
   if (s_popup_timer) {
     app_timer_cancel(s_popup_timer);
     s_popup_timer = NULL;
