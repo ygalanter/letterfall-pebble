@@ -6,6 +6,9 @@
     "pebble-app"
   ],
   "private": true,
+  "dependencies": {
+    "pebble-clay": "^1.0.4"
+  },
   "scripts": {
     "build": "pebble build",
     "clean": "pebble clean",
@@ -16,12 +19,17 @@
     "uuid": "59dbe418-652e-4dca-a546-cc5e058cd898",
     "projectType": "native",
     "sdkVersion": "3",
+    "enableMultiJS": true,
     "targetPlatforms": [
       "emery"
     ],
     "watchapp": {
       "watchface": false
     },
+    "messageKeys": [
+      "SOUND_VOLUME",
+      "SHAKE_RESET"
+    ],
     "resources": {
       "media": [
         {

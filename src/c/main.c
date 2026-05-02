@@ -34,6 +34,14 @@
 #define PERSIST_KEY_BOARD 4
 #define PERSIST_KEY_HAS_GAME 5
 #define PERSIST_KEY_SHAKE 6
+#define PERSIST_KEY_SOUND_VOLUME 7
+
+#define DEFAULT_SOUND_VOLUME 100
+
+#define COLOR_MAIN_BACKGROUND GColorBulgarianRose
+#define COLOR_MODAL_BACKGROUND GColorWindsorTan
+#define COLOR_SCORE_POPUP GColorBlueMoon
+#define COLOR_SELECTED_TILE GColorWindsorTan
 
 typedef enum {
   STATUS_DEFAULT = 0,
@@ -87,7 +95,72 @@ static AppTimer *s_popup_timer;
 
 static bool s_input_locked;
 static bool s_shake_enabled;
+static int s_sound_volume;
 static time_t s_last_shake;
+
+// ---------------------------------------------------------------------------
+// Sound feedback
+// ---------------------------------------------------------------------------
+
+static const SpeakerNote GOOD_WORD_NOTES[] = {
+  { .midi_note = 84, .waveform = SpeakerWaveformSine, .duration_ms = 55 },
+  { .midi_note = 88, .waveform = SpeakerWaveformSine, .duration_ms = 55 },
+  { .midi_note = 91, .waveform = SpeakerWaveformSine, .duration_ms = 90 },
+};
+
+static const SpeakerNote BAD_WORD_NOTES[] = {
+  { .midi_note = 55, .waveform = SpeakerWaveformSquare, .duration_ms = 90 },
+  { .midi_note = 48, .waveform = SpeakerWaveformSquare, .duration_ms = 130 },
+};
+
+static int clamp_sound_volume(int value) {
+  if (value < 0) return 0;
+  if (value > 100) return 100;
+  return value;
+}
+
+static uint8_t sound_velocity(void) {
+  int volume = clamp_sound_volume(s_sound_volume);
+  if (volume <= 0) return 0;
+  return (uint8_t)((volume * 127 + 50) / 100);
+}
+
+static void play_tap_tone(void) {
+  uint8_t velocity = sound_velocity();
+  if (velocity == 0) return;
+  SpeakerNote note = {
+    .midi_note = 88,
+    .waveform = SpeakerWaveformSquare,
+    .duration_ms = 45,
+    .velocity = velocity,
+  };
+  speaker_stop();
+  speaker_play_notes(&note, 1, 100);
+}
+
+static void play_good_tone(void) {
+  uint8_t velocity = sound_velocity();
+  if (velocity == 0) return;
+  SpeakerNote notes[sizeof(GOOD_WORD_NOTES) / sizeof(GOOD_WORD_NOTES[0])];
+  memcpy(notes, GOOD_WORD_NOTES, sizeof(notes));
+  for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
+    notes[i].velocity = velocity;
+  }
+  speaker_stop();
+  speaker_play_notes(notes, sizeof(notes) / sizeof(notes[0]), 100);
+}
+
+static void play_bad_tone(void) {
+  uint8_t velocity = sound_velocity();
+  if (velocity == 0) return;
+  SpeakerNote notes[sizeof(BAD_WORD_NOTES) / sizeof(BAD_WORD_NOTES[0])];
+  memcpy(notes, BAD_WORD_NOTES, sizeof(notes));
+  for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
+    notes[i].velocity = velocity;
+  }
+  speaker_stop();
+  speaker_play_notes(notes, sizeof(notes) / sizeof(notes[0]), 100);
+}
 
 // Letter frequency thresholds match the original Fitbit implementation.
 // pairs of {threshold * 10000, letter, cost}
@@ -462,7 +535,7 @@ static void enter_game_over(void) {
   s_drop_processing_word = false;
   force_all_alpha_full();
   s_screen = SCREEN_GAME_OVER;
-  vibes_double_pulse();
+  play_bad_tone();
   mark_dirty();
 }
 
@@ -628,7 +701,9 @@ static void popup_dismiss(void *ctx) {
 }
 
 static void on_word_validated(bool valid, const char *word, int word_len, int cost_total) {
+  (void)word_len;
   if (!valid) {
+    play_bad_tone();
     // Reset selection visuals; the press list is cleared to allow new picks.
     clear_selection();
     s_input_locked = false;
@@ -640,6 +715,7 @@ static void on_word_validated(bool valid, const char *word, int word_len, int co
   if (s_rank + 1 < RANK_COUNT && s_score >= rank_score_for(s_rank + 1)) {
     s_rank++;
   }
+  play_good_tone();
   show_score_popup(word, cost_total);
 }
 
@@ -660,7 +736,6 @@ static void submit_word(void) {
   }
   word[len] = '\0';
 
-  vibes_short_pulse();
   s_input_locked = true;
 
   bool valid = word_is_valid(word, len);
@@ -690,7 +765,7 @@ static void tap_letter(int row, int col) {
     // Only allow unpressing the most-recent tile.
     if (idx == s_selected_count - 1) {
       s_selected_count--;
-      vibes_short_pulse();
+      play_tap_tone();
       mark_dirty();
     }
     return;
@@ -702,7 +777,7 @@ static void tap_letter(int row, int col) {
   s_selected[s_selected_count][0] = row;
   s_selected[s_selected_count][1] = col;
   s_selected_count++;
-  vibes_short_pulse();
+  play_tap_tone();
   mark_dirty();
 }
 
@@ -720,7 +795,7 @@ static GColor tile_fill_color(int row, int col) {
   if (is_submit_tile(row, col)) return GColorTiffanyBlue;
   Tile *t = &s_board[row][col];
   switch (t->status) {
-    case STATUS_BURNING: return GColorRed;
+    case STATUS_BURNING: return GColorDarkCandyAppleRed;
     case STATUS_GOLD: return GColorChromeYellow;
     default: return GColorPastelYellow;
   }
@@ -795,7 +870,7 @@ static void draw_tile(GContext *ctx, int row, int col) {
 
   GColor fill = tile_fill_color(row, col);
   bool selected = selection_contains(row, col, NULL);
-  if (selected) fill = GColorOrange;
+  if (selected) fill = COLOR_SELECTED_TILE;
   fill = fade_to_board_color(fill, alpha);
 
   graphics_context_set_fill_color(ctx, fill);
@@ -811,8 +886,8 @@ static void draw_tile(GContext *ctx, int row, int col) {
 }
 
 static void draw_board(GContext *ctx) {
-  // Saddle-brown frame matches the original "saddlebrown" backdrop.
-  graphics_context_set_fill_color(ctx, GColorWindsorTan);
+  // Darker backdrop; modal tint stays closer to the original saddle-brown.
+  graphics_context_set_fill_color(ctx, COLOR_MAIN_BACKGROUND);
   graphics_fill_rect(ctx,
                      GRect(0, 0, SCREEN_W, SCREEN_H),
                      0, GCornerNone);
@@ -875,7 +950,7 @@ static void draw_text_centered(GContext *ctx, const char *text, GFont font,
 
 static void draw_title_modal(GContext *ctx) {
   GRect modal = GRect(10, 30, SCREEN_W - 20, SCREEN_H - 60);
-  tint_rect(ctx, modal, GColorWindsorTan, 9, 10);
+  tint_rect(ctx, modal, COLOR_MODAL_BACKGROUND, 9, 10);
   // Border ring
   graphics_context_set_stroke_color(ctx, GColorBulgarianRose);
   graphics_context_set_stroke_width(ctx, 2);
@@ -918,7 +993,7 @@ static void draw_title_modal(GContext *ctx) {
 
 static void draw_score_popup(GContext *ctx) {
   GRect modal = GRect(10, 76, SCREEN_W - 20, 76);
-  tint_rect(ctx, modal, GColorBlue, 3, 5);
+  tint_rect(ctx, modal, COLOR_SCORE_POPUP, 4, 5);
   graphics_context_set_stroke_color(ctx, GColorOxfordBlue);
   graphics_context_set_stroke_width(ctx, 2);
   graphics_draw_round_rect(ctx, modal, 8);
@@ -1081,6 +1156,50 @@ static void click_config_provider(void *context) {
 }
 
 // ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+static int parse_int_tuple(Tuple *t, int fallback) {
+  if (!t) return fallback;
+  if (t->type == TUPLE_CSTRING) {
+    return atoi(t->value->cstring);
+  }
+  return (int)t->value->int32;
+}
+
+static bool parse_bool_tuple(Tuple *t, bool fallback) {
+  if (!t) return fallback;
+  if (t->type == TUPLE_CSTRING) {
+    const char *v = t->value->cstring;
+    if (!v) return fallback;
+    if (strcmp(v, "true") == 0 || strcmp(v, "TRUE") == 0) return true;
+    if (strcmp(v, "false") == 0 || strcmp(v, "FALSE") == 0) return false;
+    return atoi(v) != 0;
+  }
+  return t->value->uint8 != 0;
+}
+
+static void inbox_received(DictionaryIterator *iter, void *ctx) {
+  (void)ctx;
+  Tuple *t_volume = dict_find(iter, MESSAGE_KEY_SOUND_VOLUME);
+  Tuple *t_shake = dict_find(iter, MESSAGE_KEY_SHAKE_RESET);
+
+  if (t_volume) {
+    s_sound_volume = clamp_sound_volume(parse_int_tuple(t_volume, s_sound_volume));
+    persist_write_int(PERSIST_KEY_SOUND_VOLUME, s_sound_volume);
+  }
+  if (t_shake) {
+    s_shake_enabled = parse_bool_tuple(t_shake, s_shake_enabled);
+    persist_write_int(PERSIST_KEY_SHAKE, s_shake_enabled ? 1 : 0);
+  }
+}
+
+static void inbox_dropped(AppMessageResult reason, void *ctx) {
+  (void)ctx;
+  APP_LOG(APP_LOG_LEVEL_ERROR, "Settings inbox dropped: %d", (int)reason);
+}
+
+// ---------------------------------------------------------------------------
 // Accel: shake to shuffle
 // ---------------------------------------------------------------------------
 
@@ -1106,7 +1225,7 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (now - s_last_shake < (SHAKE_DEBOUNCE_MS / 1000) + 1) return;
   s_last_shake = now;
 
-  vibes_short_pulse();
+  play_tap_tone();
   shuffle_non_burning();
 
   // Mark below burning so the burnings drop, then run a drop animation.
@@ -1165,6 +1284,9 @@ static void init(void) {
   s_score = persist_exists(PERSIST_KEY_SCORE) ? persist_read_int(PERSIST_KEY_SCORE) : 0;
   s_rank = persist_exists(PERSIST_KEY_RANK) ? persist_read_int(PERSIST_KEY_RANK) : 0;
   s_shake_enabled = persist_exists(PERSIST_KEY_SHAKE) ? persist_read_int(PERSIST_KEY_SHAKE) : 0;
+  s_sound_volume = persist_exists(PERSIST_KEY_SOUND_VOLUME)
+                       ? clamp_sound_volume(persist_read_int(PERSIST_KEY_SOUND_VOLUME))
+                       : DEFAULT_SOUND_VOLUME;
 
   reset_small_words();
   reset_big_words();
@@ -1178,16 +1300,21 @@ static void init(void) {
   s_screen = SCREEN_TITLE;
 
   s_window = window_create();
-  window_set_background_color(s_window, GColorWindsorTan);
+  window_set_background_color(s_window, COLOR_MAIN_BACKGROUND);
   window_set_click_config_provider(s_window, click_config_provider);
   window_set_window_handlers(s_window, (WindowHandlers){
     .load = window_load,
     .unload = window_unload,
   });
   window_stack_push(s_window, true);
+
+  app_message_register_inbox_received(inbox_received);
+  app_message_register_inbox_dropped(inbox_dropped);
+  app_message_open(128, 64);
 }
 
 static void deinit(void) {
+  app_message_deregister_callbacks();
   window_destroy(s_window);
 }
 

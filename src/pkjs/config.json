@@ -1,0 +1,32 @@
+[
+  {
+    "type": "heading",
+    "defaultValue": "Letterfall Settings"
+  },
+  {
+    "type": "section",
+    "items": [
+      {
+        "type": "slider",
+        "messageKey": "SOUND_VOLUME",
+        "label": "Sound Volume",
+        "description": "0 is silent, 100 is full volume.",
+        "defaultValue": 20,
+        "min": 0,
+        "max": 100,
+        "step": 1
+      },
+      {
+        "type": "toggle",
+        "messageKey": "SHAKE_RESET",
+        "label": "Reset Board on Shake",
+        "description": "Shake reshuffles non-burning tiles and advances fire.",
+        "defaultValue": false
+      }
+    ]
+  },
+  {
+    "type": "submit",
+    "defaultValue": "Save"
+  }
+]
