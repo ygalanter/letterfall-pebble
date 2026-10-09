@@ -444,18 +444,15 @@ static bool word_is_valid(const char *word, int len) {
 
   int min_idx = 0;
   int max_idx = count - 1;
-  int prev_idx = -1;
-  int idx = 0;
-  while (prev_idx != idx) {
-    prev_idx = idx;
-    idx = (max_idx + min_idx) / 2;
+  while (min_idx <= max_idx) {
+    int idx = min_idx + (max_idx - min_idx) / 2;
     uint32_t value;
     if (resource_load_byte_range(h, idx * 4, (uint8_t *)&value, 4) != 4) {
       return false;
     }
     if (value == key) return true;
-    if (value < key) min_idx = idx;
-    else max_idx = idx;
+    if (value < key) min_idx = idx + 1;
+    else max_idx = idx - 1;
   }
   return false;
 }
