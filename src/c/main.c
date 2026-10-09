@@ -35,8 +35,10 @@
 #define PERSIST_KEY_HAS_GAME 5
 #define PERSIST_KEY_SHAKE 6
 #define PERSIST_KEY_SOUND_VOLUME 7
+#define PERSIST_KEY_BACKLIGHT_COLOR 8
 
 #define DEFAULT_SOUND_VOLUME 20  // matches Clay slider default in src/pkjs/config.json
+#define DEFAULT_BACKLIGHT_COLOR BACKLIGHT_DISABLED
 
 #define COLOR_MAIN_BACKGROUND GColorBulgarianRose
 #define COLOR_MODAL_BACKGROUND GColorWindsorTan
@@ -61,6 +63,15 @@ typedef enum {
   TITLE_NEW,
   TITLE_CONTINUED,
 } TitleVariant;
+
+typedef enum {
+  BACKLIGHT_DISABLED = 0,
+  BACKLIGHT_WHITE,
+  BACKLIGHT_YELLOW,
+  BACKLIGHT_RED,
+  BACKLIGHT_BLUE,
+  BACKLIGHT_GREEN,
+} BacklightColor;
 
 typedef struct {
   uint8_t letter;
@@ -96,7 +107,49 @@ static AppTimer *s_popup_timer;
 static bool s_input_locked;
 static bool s_shake_enabled;
 static int s_sound_volume;
+static BacklightColor s_backlight_color;
 static time_t s_last_shake;
+
+// ---------------------------------------------------------------------------
+// Backlight
+// ---------------------------------------------------------------------------
+
+static BacklightColor clamp_backlight_color(int value) {
+  if (value < BACKLIGHT_DISABLED || value > BACKLIGHT_GREEN) {
+    return BACKLIGHT_DISABLED;
+  }
+  return (BacklightColor)value;
+}
+
+static void update_game_backlight(void) {
+  if (s_backlight_color == BACKLIGHT_DISABLED) {
+    light_enable(false);
+    light_set_system_color();
+    return;
+  }
+
+  uint32_t rgb = 0xFFFFFF;
+  switch (s_backlight_color) {
+    case BACKLIGHT_YELLOW:
+      rgb = 0xFFFF00;
+      break;
+    case BACKLIGHT_RED:
+      rgb = 0xFF0000;
+      break;
+    case BACKLIGHT_BLUE:
+      rgb = 0x0000FF;
+      break;
+    case BACKLIGHT_GREEN:
+      rgb = 0x00FF00;
+      break;
+    case BACKLIGHT_WHITE:
+    default:
+      break;
+  }
+
+  light_set_color_rgb888(rgb);
+  light_enable(true);
+}
 
 // ---------------------------------------------------------------------------
 // Sound feedback
@@ -566,6 +619,7 @@ static void enter_game_over(void) {
   s_drop_processing_word = false;
   force_all_alpha_full();
   s_screen = SCREEN_GAME_OVER;
+  update_game_backlight();
   play_game_over_tone();
   mark_dirty();
 }
@@ -719,6 +773,7 @@ static void show_score_popup(const char *word, int cost) {
   s_popup_cost = cost;
   update_rank_line();
   s_screen = SCREEN_POPUP;
+  update_game_backlight();
   if (s_popup_timer) {
     app_timer_cancel(s_popup_timer);
   }
@@ -730,6 +785,7 @@ static void popup_dismiss(void *ctx) {
   (void)ctx;
   s_popup_timer = NULL;
   s_screen = SCREEN_PLAYING;
+  update_game_backlight();
   mark_pressed_deleted();
   start_drop_animation((int)strlen(s_popup_word));
 }
@@ -1076,6 +1132,7 @@ static void enter_title(TitleVariant variant) {
   s_input_locked = false;
   s_title_variant = variant;
   s_screen = SCREEN_TITLE;
+  update_game_backlight();
   mark_dirty();
 }
 
@@ -1098,6 +1155,7 @@ static void start_or_resume_game(void) {
     return;
   }
   s_screen = SCREEN_PLAYING;
+  update_game_backlight();
   s_input_locked = false;
   mark_dirty();
 }
@@ -1111,6 +1169,7 @@ static void handle_game_over_tap(void) {
   reset_big_words();
   s_title_variant = TITLE_NEW;
   s_screen = SCREEN_TITLE;
+  update_game_backlight();
   mark_dirty();
 }
 
@@ -1239,6 +1298,7 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
   (void)ctx;
   Tuple *t_volume = dict_find(iter, MESSAGE_KEY_SOUND_VOLUME);
   Tuple *t_shake = dict_find(iter, MESSAGE_KEY_SHAKE_RESET);
+  Tuple *t_backlight = dict_find(iter, MESSAGE_KEY_BACKLIGHT_COLOR);
 
   if (t_volume) {
     s_sound_volume = clamp_sound_volume(parse_int_tuple(t_volume, s_sound_volume));
@@ -1247,6 +1307,12 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
   if (t_shake) {
     s_shake_enabled = parse_bool_tuple(t_shake, s_shake_enabled);
     persist_write_int(PERSIST_KEY_SHAKE, s_shake_enabled ? 1 : 0);
+  }
+  if (t_backlight) {
+    s_backlight_color = clamp_backlight_color(
+        parse_int_tuple(t_backlight, s_backlight_color));
+    persist_write_int(PERSIST_KEY_BACKLIGHT_COLOR, s_backlight_color);
+    update_game_backlight();
   }
 }
 
@@ -1343,6 +1409,10 @@ static void init(void) {
   s_sound_volume = persist_exists(PERSIST_KEY_SOUND_VOLUME)
                        ? clamp_sound_volume(persist_read_int(PERSIST_KEY_SOUND_VOLUME))
                        : DEFAULT_SOUND_VOLUME;
+  s_backlight_color = persist_exists(PERSIST_KEY_BACKLIGHT_COLOR)
+                          ? clamp_backlight_color(
+                                persist_read_int(PERSIST_KEY_BACKLIGHT_COLOR))
+                          : DEFAULT_BACKLIGHT_COLOR;
 
   reset_small_words();
   reset_big_words();
@@ -1354,6 +1424,7 @@ static void init(void) {
     s_title_variant = TITLE_NEW;
   }
   s_screen = SCREEN_TITLE;
+  update_game_backlight();
 
   s_window = window_create();
   window_set_background_color(s_window, COLOR_MAIN_BACKGROUND);
@@ -1371,6 +1442,8 @@ static void init(void) {
 
 static void deinit(void) {
   app_message_deregister_callbacks();
+  light_enable(false);
+  light_set_system_color();
   window_destroy(s_window);
 }
 
