@@ -17,6 +17,39 @@
         "step": 1
       },
       {
+        "type": "select",
+        "messageKey": "BACKLIGHT_COLOR",
+        "label": "Backlight",
+        "description": "Keep this backlight color on during the game.",
+        "defaultValue": "0",
+        "options": [
+          {
+            "label": "Disabled",
+            "value": "0"
+          },
+          {
+            "label": "White",
+            "value": "1"
+          },
+          {
+            "label": "Yellow",
+            "value": "2"
+          },
+          {
+            "label": "Red",
+            "value": "3"
+          },
+          {
+            "label": "Blue",
+            "value": "4"
+          },
+          {
+            "label": "Green",
+            "value": "5"
+          }
+        ]
+      },
+      {
         "type": "toggle",
         "messageKey": "SHAKE_RESET",
         "label": "Reset Board on Shake",
